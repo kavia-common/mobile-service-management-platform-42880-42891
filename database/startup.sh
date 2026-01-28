@@ -142,6 +142,77 @@ export POSTGRES_DB="${DB_NAME}"
 export POSTGRES_PORT="${DB_PORT}"
 EOF
 
+# ----------------------------
+# Schema + seed initialization
+# ----------------------------
+# We prefer DATABASE_URL if provided; otherwise we fall back to db_connection.txt.
+# This makes it easy for other containers (backend) and local tooling to share the same connection string.
+DATABASE_URL_DEFAULT="postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}"
+DATABASE_URL="${DATABASE_URL:-$DATABASE_URL_DEFAULT}"
+
+# psql invocation (non-interactive, stops on error)
+PSQL="psql ${DATABASE_URL} -v ON_ERROR_STOP=1"
+
+echo ""
+echo "Initializing schema (idempotent) on ${DATABASE_URL} ..."
+
+# Tables
+${PSQL} -c "CREATE TABLE IF NOT EXISTS phone_brands (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE);"
+${PSQL} -c "CREATE TABLE IF NOT EXISTS issues (id BIGSERIAL PRIMARY KEY, brand_id BIGINT REFERENCES phone_brands(id) ON DELETE CASCADE, name TEXT NOT NULL, CONSTRAINT issues_brand_name_unique UNIQUE (brand_id, name));"
+${PSQL} -c "CREATE TABLE IF NOT EXISTS repair_offerings (id BIGSERIAL PRIMARY KEY, brand_id BIGINT NOT NULL REFERENCES phone_brands(id) ON DELETE CASCADE, issue_id BIGINT NOT NULL REFERENCES issues(id) ON DELETE CASCADE, price NUMERIC(10,2) NOT NULL CHECK (price >= 0), eta_days INTEGER NOT NULL CHECK (eta_days >= 0), CONSTRAINT repair_offerings_brand_issue_unique UNIQUE (brand_id, issue_id));"
+${PSQL} -c "CREATE TABLE IF NOT EXISTS bookings (id BIGSERIAL PRIMARY KEY, customer_name TEXT NOT NULL, phone TEXT NOT NULL, brand_id BIGINT NOT NULL REFERENCES phone_brands(id) ON DELETE RESTRICT, issue_id BIGINT NOT NULL REFERENCES issues(id) ON DELETE RESTRICT, status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), notes TEXT);"
+${PSQL} -c "CREATE TABLE IF NOT EXISTS admin_users (id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', created_at TIMESTAMPTZ NOT NULL DEFAULT now());"
+
+# Indexes (safe/idempotent)
+${PSQL} -c "CREATE INDEX IF NOT EXISTS idx_issues_brand_id ON issues(brand_id);"
+${PSQL} -c "CREATE INDEX IF NOT EXISTS idx_repair_offerings_brand_id ON repair_offerings(brand_id);"
+${PSQL} -c "CREATE INDEX IF NOT EXISTS idx_repair_offerings_issue_id ON repair_offerings(issue_id);"
+${PSQL} -c "CREATE INDEX IF NOT EXISTS idx_bookings_brand_id ON bookings(brand_id);"
+${PSQL} -c "CREATE INDEX IF NOT EXISTS idx_bookings_issue_id ON bookings(issue_id);"
+${PSQL} -c "CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);"
+${PSQL} -c "CREATE INDEX IF NOT EXISTS idx_bookings_created_at ON bookings(created_at);"
+
+echo "Seeding demo data (idempotent) ..."
+
+# Brands
+${PSQL} -c "INSERT INTO phone_brands(name) VALUES ('Apple') ON CONFLICT (name) DO NOTHING;"
+${PSQL} -c "INSERT INTO phone_brands(name) VALUES ('Samsung') ON CONFLICT (name) DO NOTHING;"
+${PSQL} -c "INSERT INTO phone_brands(name) VALUES ('Google') ON CONFLICT (name) DO NOTHING;"
+
+# Issues (per brand)
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Screen' FROM phone_brands WHERE name='Apple' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Battery' FROM phone_brands WHERE name='Apple' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Camera' FROM phone_brands WHERE name='Apple' ON CONFLICT DO NOTHING;"
+
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Screen' FROM phone_brands WHERE name='Samsung' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Battery' FROM phone_brands WHERE name='Samsung' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Camera' FROM phone_brands WHERE name='Samsung' ON CONFLICT DO NOTHING;"
+
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Screen' FROM phone_brands WHERE name='Google' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Battery' FROM phone_brands WHERE name='Google' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO issues(brand_id, name) SELECT id, 'Camera' FROM phone_brands WHERE name='Google' ON CONFLICT DO NOTHING;"
+
+# Repair offerings (sample prices/ETA)
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 199.00, 2 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Apple' AND i.name='Screen' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 129.00, 2 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Apple' AND i.name='Battery' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 149.00, 3 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Apple' AND i.name='Camera' ON CONFLICT DO NOTHING;"
+
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 179.00, 2 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Samsung' AND i.name='Screen' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 109.00, 2 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Samsung' AND i.name='Battery' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 139.00, 3 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Samsung' AND i.name='Camera' ON CONFLICT DO NOTHING;"
+
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 189.00, 2 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Google' AND i.name='Screen' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 119.00, 2 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Google' AND i.name='Battery' ON CONFLICT DO NOTHING;"
+${PSQL} -c "INSERT INTO repair_offerings(brand_id, issue_id, price, eta_days) SELECT b.id, i.id, 129.00, 3 FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Google' AND i.name='Camera' ON CONFLICT DO NOTHING;"
+
+# Demo bookings (a few rows, idempotent-ish: avoid duplicates by matching tuple)
+${PSQL} -c "INSERT INTO bookings(customer_name, phone, brand_id, issue_id, status, notes) SELECT 'Jordan Lee', '+1-555-0101', b.id, i.id, 'pending', 'Cracked screen after drop' FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Apple' AND i.name='Screen' AND NOT EXISTS (SELECT 1 FROM bookings bk WHERE bk.customer_name='Jordan Lee' AND bk.phone='+1-555-0101' AND bk.brand_id=b.id AND bk.issue_id=i.id);"
+${PSQL} -c "INSERT INTO bookings(customer_name, phone, brand_id, issue_id, status, notes) SELECT 'Avery Kim', '+1-555-0102', b.id, i.id, 'in_progress', 'Battery drains quickly' FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Samsung' AND i.name='Battery' AND NOT EXISTS (SELECT 1 FROM bookings bk WHERE bk.customer_name='Avery Kim' AND bk.phone='+1-555-0102' AND bk.brand_id=b.id AND bk.issue_id=i.id);"
+${PSQL} -c "INSERT INTO bookings(customer_name, phone, brand_id, issue_id, status, notes) SELECT 'Sam Patel', '+1-555-0103', b.id, i.id, 'completed', 'Rear camera not focusing' FROM phone_brands b JOIN issues i ON i.brand_id=b.id WHERE b.name='Google' AND i.name='Camera' AND NOT EXISTS (SELECT 1 FROM bookings bk WHERE bk.customer_name='Sam Patel' AND bk.phone='+1-555-0103' AND bk.brand_id=b.id AND bk.issue_id=i.id);"
+
+echo "Schema + seed complete."
+echo ""
+
 echo "PostgreSQL setup complete!"
 echo "Database: ${DB_NAME}"
 echo "User: ${DB_USER}"
